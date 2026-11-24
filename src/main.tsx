@@ -4,7 +4,8 @@ import { registerSW } from "virtual:pwa-register";
 import App from "./App";
 import "./index.css";
 
-registerSW({ immediate: true });
+// Für die Einzeldatei-Variante (scripts/build-artifact.mjs) ohne Service Worker.
+if (!import.meta.env.VITE_NO_SW) registerSW({ immediate: true });
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

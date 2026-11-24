@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { BaselineTestScreen } from "./components/BaselineTestScreen";
+import { BaselineTestScreen, type MaxTestMode } from "./components/BaselineTestScreen";
 import { ProgressScreen } from "./components/ProgressScreen";
-import { WorkoutScreen } from "./components/WorkoutScreen";
-import type { ActiveSession, AppState, PushupVariant, WorkoutSession } from "./domain/models";
-import { applyBaselineTest, finishSession, logSet, planNextSession, startSession } from "./domain/planner";
+import { WorkoutScreen, type LastEvent } from "./components/WorkoutScreen";
+import type { ActiveSession, AppState, PushupVariant } from "./domain/models";
+import {
+  applyBaselineTest,
+  applyMaxTest,
+  finishSession,
+  logSet,
+  planNextSession,
+  startSession,
+} from "./domain/planner";
 import {
   clearAll,
   createInitialState,
@@ -37,8 +44,10 @@ export default function App() {
   const [state, setState] = useState<AppState>(initial.state);
   const [active, setActive] = useState<ActiveSession | null>(() => loadActiveSession());
   const [warning, setWarning] = useState<string | undefined>(initial.recoveredFromError);
-  const [lastFinished, setLastFinished] = useState<WorkoutSession | null>(null);
+  const [lastEvent, setLastEvent] = useState<LastEvent | null>(null);
   const [tab, setTab] = useState<Tab>("workout");
+  /** Geöffneter Test-Dialog: Plan-Neustart oder freier Max-Test. */
+  const [testMode, setTestMode] = useState<Exclude<MaxTestMode, "initial"> | null>(null);
   const [theme, setTheme] = useState<Theme>(readTheme);
 
   useEffect(() => {
@@ -58,14 +67,24 @@ export default function App() {
 
   const plan = useMemo(() => planNextSession(state), [state]);
 
-  const handleBaseline = (reps: number, variant: PushupVariant) => {
-    setState((s) => applyBaselineTest(s, reps, variant));
+  const handleTestSaved = (reps: number, variant: PushupVariant) => {
+    const isMaxTest = testMode === "maxTest";
+    const next = isMaxTest
+      ? applyMaxTest(state, reps, newId(), new Date())
+      : applyBaselineTest(state, reps, variant, newId(), new Date());
+    if (!next) return;
+    setState(next);
+    const test = next.maxTests[next.maxTests.length - 1];
+    // Beim Erststart keine Rückmeldung – der neue Plan spricht für sich.
+    setLastEvent(test && testMode ? { kind: "maxTest", test } : null);
+    setActive(null);
+    setTestMode(null);
     setTab("workout");
   };
 
   const handleStart = () => {
     if (!plan) return;
-    setLastFinished(null);
+    setLastEvent(null);
     setActive(startSession(plan, newId(), new Date()));
   };
 
@@ -73,16 +92,21 @@ export default function App() {
     if (!active) return;
     const next = finishSession(state, active, new Date());
     setState(next);
-    setLastFinished(next.sessions[next.sessions.length - 1] ?? null);
+    const session = next.sessions[next.sessions.length - 1];
+    setLastEvent(session ? { kind: "session", session } : null);
     setActive(null);
   };
 
   const replaceState = (next: AppState) => {
     setState(next);
     setActive(null);
-    setLastFinished(null);
+    setLastEvent(null);
+    setTestMode(null);
     setTab("workout");
   };
+
+  const openMaxTest = () => setTestMode("maxTest");
+  const openRestart = () => setTestMode("restart");
 
   const handleReset = () => {
     clearAll();
@@ -90,18 +114,38 @@ export default function App() {
   };
 
   let content;
-  if (!plan) {
-    content = <BaselineTestScreen initialVariant={state.variant} onSave={handleBaseline} />;
+  if (!plan || (testMode && !active)) {
+    const mode: MaxTestMode = plan ? testMode! : "initial";
+    content = (
+      <BaselineTestScreen
+        key={mode}
+        mode={mode}
+        initialVariant={state.variant}
+        currentMax={state.currentMax}
+        onSave={handleTestSaved}
+        onCancel={plan ? () => setTestMode(null) : undefined}
+      />
+    );
   } else if (tab === "progress" && !active) {
-    content = <ProgressScreen state={state} onImport={replaceState} onReset={handleReset} />;
+    content = (
+      <ProgressScreen
+        state={state}
+        onImport={replaceState}
+        onReset={handleReset}
+        onOpenMaxTest={openMaxTest}
+        onOpenRestart={openRestart}
+      />
+    );
   } else {
     content = (
       <WorkoutScreen
         state={state}
         plan={plan}
         active={active}
-        lastFinished={lastFinished}
+        lastEvent={lastEvent}
         onStart={handleStart}
+        onOpenMaxTest={openMaxTest}
+        onOpenRestart={openRestart}
         onLogSet={(input) => setActive((a) => (a ? logSet(a, input, new Date()) : a))}
         onFinish={handleFinish}
         onAbort={() => setActive(null)}
@@ -109,7 +153,7 @@ export default function App() {
     );
   }
 
-  const showNav = plan !== null && active === null;
+  const showNav = plan !== null && active === null && testMode === null;
 
   return (
     <div className="mx-auto flex min-h-dvh max-w-lg flex-col px-4 pt-[max(1rem,env(safe-area-inset-top))]">

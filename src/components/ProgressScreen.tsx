@@ -1,32 +1,43 @@
 import { useRef, useState } from "react";
-import { VARIANT_LABELS, type AppState } from "../domain/models";
-import {
-  SESSIONS_PER_CYCLE,
-  evaluateSession,
-  getCycleNumber,
-  sessionsInCurrentCycle,
-  slotFromIndex,
-} from "../domain/planner";
+import { VARIANT_LABELS, type AppState, type MaxTest, type WorkoutSession } from "../domain/models";
+import { SESSIONS_PER_CYCLE, evaluateSession, sessionsInCurrentCycle, slotFromIndex } from "../domain/planner";
 import { downloadStateJson, parseImportedJson } from "../storage/workoutStore";
 import { Button, Card, ConfirmDialog } from "./ui";
+import { PlanActions } from "./WorkoutScreen";
 
 const dateFmt = new Intl.DateTimeFormat("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" });
+
+type HistoryEntry = { kind: "session"; date: string; session: WorkoutSession } | { kind: "maxTest"; date: string; test: MaxTest };
+
+/** Einheiten und Max-Tests als gemeinsamer Verlauf, neueste zuerst. */
+function buildHistory(state: AppState): HistoryEntry[] {
+  const entries: HistoryEntry[] = [
+    ...state.sessions.map((session) => ({ kind: "session" as const, date: session.date, session })),
+    ...state.maxTests.map((test) => ({ kind: "maxTest" as const, date: test.date, test })),
+  ];
+  return entries.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+}
 
 export function ProgressScreen({
   state,
   onImport,
   onReset,
+  onOpenMaxTest,
+  onOpenRestart,
 }: {
   state: AppState;
   onImport: (state: AppState) => void;
   onReset: () => void;
+  onOpenMaxTest: () => void;
+  onOpenRestart: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [pendingImport, setPendingImport] = useState<AppState | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
 
-  const done = sessionsInCurrentCycle(state.sessions);
+  const done = sessionsInCurrentCycle(state);
+  const history = buildHistory(state);
   const totalReps = state.sessions.reduce((sum, s) => sum + s.sets.reduce((a, b) => a + b.actualReps, 0), 0);
   const gain = (state.currentMax ?? 0) - (state.baselineMax ?? 0);
 
@@ -54,7 +65,7 @@ export function ProgressScreen({
 
       <Card>
         <div className="mb-3 flex items-baseline justify-between">
-          <h2 className="text-lg font-bold">Zyklus {getCycleNumber(state.sessions)}</h2>
+          <h2 className="text-lg font-bold">Zyklus {state.cycle}</h2>
           <span className="text-sm text-slate-500 dark:text-slate-400">
             {done}/{SESSIONS_PER_CYCLE} Einheiten
           </span>
@@ -64,6 +75,9 @@ export function ProgressScreen({
             <CycleRow key={week} week={week} done={done} />
           ))}
         </div>
+        <div className="mt-4">
+          <PlanActions onOpenMaxTest={onOpenMaxTest} onOpenRestart={onOpenRestart} />
+        </div>
       </Card>
 
       <Card>
@@ -71,42 +85,17 @@ export function ProgressScreen({
           <h2 className="text-lg font-bold">Verlauf</h2>
           <span className="text-sm text-slate-500 dark:text-slate-400">{totalReps} Wdh. gesamt</span>
         </div>
-        {state.sessions.length === 0 ? (
+        {history.length === 0 ? (
           <p className="text-slate-500 dark:text-slate-400">Noch keine Einheit abgeschlossen.</p>
         ) : (
           <ul className="divide-y divide-slate-200 dark:divide-slate-800">
-            {[...state.sessions].reverse().map((s) => {
-              const delta = s.endingMax - s.startingMax;
-              const outcome = evaluateSession(s.sets);
-              return (
-                <li key={s.id} className="flex items-center justify-between gap-3 py-3">
-                  <div className="min-w-0">
-                    <p className="font-semibold">
-                      W{s.week} · E{s.sessionInWeek} {s.isRetest && <span className="text-emerald-500">Retest</span>}
-                    </p>
-                    <p className="truncate text-sm text-slate-500 dark:text-slate-400">
-                      {dateFmt.format(new Date(s.date))} · {s.sets.map((x) => x.actualReps).join(" / ")}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right">
-                    <p className="font-bold tabular-nums">
-                      {s.startingMax} → {s.endingMax}
-                    </p>
-                    <p
-                      className={`text-sm ${
-                        delta > 0
-                          ? "text-emerald-500"
-                          : delta < 0
-                            ? "text-amber-500"
-                            : "text-slate-500 dark:text-slate-400"
-                      }`}
-                    >
-                      {delta > 0 ? `+${delta}` : delta < 0 ? delta : outcome === "progress" ? "sauber" : "gehalten"}
-                    </p>
-                  </div>
-                </li>
-              );
-            })}
+            {history.map((e) =>
+              e.kind === "session" ? (
+                <SessionRow key={`s-${e.session.id}`} session={e.session} />
+              ) : (
+                <MaxTestRow key={`m-${e.test.id}`} test={e.test} />
+              ),
+            )}
           </ul>
         )}
       </Card>
@@ -148,7 +137,8 @@ export function ProgressScreen({
           setPendingImport(null);
         }}
       >
-        Die importierte Datei enthält {pendingImport?.sessions.length ?? 0} Einheiten. Deine aktuellen Daten
+        Die importierte Datei enthält {pendingImport?.sessions.length ?? 0} Einheiten und{" "}
+        {pendingImport?.maxTests.length ?? 0} Max-Tests. Deine aktuellen Daten
         (inkl. einer laufenden Einheit) werden ersetzt.
       </ConfirmDialog>
 
@@ -165,6 +155,59 @@ export function ProgressScreen({
         Basiswert, Verlauf und laufende Einheit werden unwiderruflich gelöscht. Tipp: Vorher exportieren.
       </ConfirmDialog>
     </div>
+  );
+}
+
+function deltaClass(delta: number) {
+  if (delta > 0) return "text-emerald-500";
+  if (delta < 0) return "text-amber-500";
+  return "text-slate-500 dark:text-slate-400";
+}
+
+function SessionRow({ session: s }: { session: WorkoutSession }) {
+  const delta = s.endingMax - s.startingMax;
+  const label = delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : evaluateSession(s.sets) === "progress" ? "sauber" : "gehalten";
+  return (
+    <li className="flex items-center justify-between gap-3 py-3">
+      <div className="min-w-0">
+        <p className="font-semibold">
+          W{s.week} · E{s.sessionInWeek} {s.isRetest && <span className="text-emerald-500">Retest</span>}
+        </p>
+        <p className="truncate text-sm text-slate-500 dark:text-slate-400">
+          {dateFmt.format(new Date(s.date))} · {s.sets.map((x) => x.actualReps).join(" / ")}
+        </p>
+      </div>
+      <div className="shrink-0 text-right">
+        <p className="font-bold tabular-nums">
+          {s.startingMax} → {s.endingMax}
+        </p>
+        <p className={`text-sm ${deltaClass(delta)}`}>{label}</p>
+      </div>
+    </li>
+  );
+}
+
+function MaxTestRow({ test }: { test: MaxTest }) {
+  const delta = test.previousMax === null ? 0 : test.newMax - test.previousMax;
+  return (
+    <li className="flex items-center justify-between gap-3 py-3">
+      <div className="min-w-0">
+        <p className="font-semibold text-sky-600 dark:text-sky-400">
+          {test.kind === "baseline" ? "Basistest · Planstart" : "Max-Test"}
+        </p>
+        <p className="truncate text-sm text-slate-500 dark:text-slate-400">
+          {dateFmt.format(new Date(test.date))} · {test.reps} Wdh. · {VARIANT_LABELS[test.variant]}
+        </p>
+      </div>
+      <div className="shrink-0 text-right">
+        <p className="font-bold tabular-nums">
+          {test.previousMax ?? "–"} → {test.newMax}
+        </p>
+        {test.previousMax !== null && (
+          <p className={`text-sm ${deltaClass(delta)}`}>{delta > 0 ? `+${delta}` : delta < 0 ? delta : "gleich"}</p>
+        )}
+      </div>
+    </li>
   );
 }
 

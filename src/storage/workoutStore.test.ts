@@ -28,7 +28,7 @@ class MemoryStorage implements KeyValueStorage {
 }
 
 const sample: AppState = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   variant: "incline",
   baselineMax: 10,
   currentMax: 11,
@@ -45,6 +45,11 @@ const sample: AppState = {
         { setIndex: 1, targetReps: 6, actualReps: 6, cleanForm: true, restSecondsPlanned: 90, completedAt: "2026-01-01T10:01:00.000Z" },
       ],
     },
+  ],
+  cycleStartIndex: 0,
+  cycle: 1,
+  maxTests: [
+    { id: "m", date: "2026-01-01T09:00:00.000Z", kind: "baseline", variant: "incline", reps: 10, previousMax: null, newMax: 10 },
   ],
 };
 
@@ -75,17 +80,39 @@ describe("workoutStore", () => {
     expect(loadState(s).recoveredFromError).toMatch(/Variante/);
   });
 
-  it("migriert Daten ohne schemaVersion", () => {
+  it("migriert v1-Daten (und Daten ohne schemaVersion) auf v2", () => {
+    const retest = { ...sample.sessions[0]!, id: "r", week: 4, sessionInWeek: 3, isRetest: true };
+    const regular = { ...sample.sessions[0]!, id: "c" };
+    const v1 = {
+      schemaVersion: 1,
+      variant: "incline",
+      baselineMax: 10,
+      currentMax: 11,
+      sessions: [sample.sessions[0], retest, regular],
+    };
+    const expected: AppState = {
+      schemaVersion: 2,
+      variant: "incline",
+      baselineMax: 10,
+      currentMax: 11,
+      sessions: v1.sessions as AppState["sessions"],
+      cycleStartIndex: 2,
+      cycle: 2,
+      maxTests: [],
+    };
     const s = new MemoryStorage();
-    const { schemaVersion: _omit, ...legacy } = sample;
-    s.setItem(STATE_KEY, JSON.stringify(legacy));
-    expect(loadState(s).state).toEqual(sample);
+    s.setItem(STATE_KEY, JSON.stringify(v1));
+    expect(loadState(s)).toEqual({ state: expected });
+    const { schemaVersion: _omit, ...unversioned } = v1;
+    expect(parseImportedJson(JSON.stringify(unversioned))).toEqual({ ok: true, state: expected });
   });
 
   it("Export/Import-Roundtrip und Validierung", () => {
     expect(parseImportedJson(exportStateJson(sample))).toEqual({ ok: true, state: sample });
     expect(parseImportedJson("nope").ok).toBe(false);
-    expect(parseImportedJson(JSON.stringify({ ...sample, schemaVersion: 2 })).ok).toBe(false);
+    expect(parseImportedJson(JSON.stringify({ ...sample, schemaVersion: 3 })).ok).toBe(false);
+    expect(parseImportedJson(JSON.stringify({ ...sample, cycleStartIndex: 5 })).ok).toBe(false);
+    expect(parseImportedJson(JSON.stringify({ ...sample, maxTests: [{ id: "x" }] })).ok).toBe(false);
     expect(parseImportedJson(JSON.stringify({ ...sample, baselineMax: null })).ok).toBe(false);
     const badSet = structuredClone(sample);
     (badSet.sessions[0]!.sets[0] as unknown as Record<string, unknown>).actualReps = "6";

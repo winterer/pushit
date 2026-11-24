@@ -3,13 +3,13 @@ import type { AppState, SetLog, SetTarget, WorkoutSession } from "./models";
 import {
   adaptRemainingSets,
   applyBaselineTest,
+  applyMaxTest,
   buildSessionPlan,
   computeNextMax,
   computeRetestMax,
   currentSetTarget,
   evaluateSession,
   finishSession,
-  getCycleNumber,
   getNextSlot,
   isRetestSlot,
   isStrugglingSet,
@@ -47,19 +47,28 @@ function session(partial: Partial<WorkoutSession> & Pick<WorkoutSession, "starti
 }
 
 function emptyState(): AppState {
-  return { schemaVersion: 1, variant: "standard", baselineMax: null, currentMax: null, sessions: [] };
+  return {
+    schemaVersion: 2,
+    variant: "standard",
+    baselineMax: null,
+    currentMax: null,
+    sessions: [],
+    cycleStartIndex: 0,
+    cycle: 1,
+    maxTests: [],
+  };
 }
 
 const cleanSets = (target: number, n = 4) => Array.from({ length: n }, (_, i) => log(target, target, true, i + 1));
 
 describe("Basiswert", () => {
   it("setzt baselineMax und currentMax mit Minimum 3", () => {
-    expect(applyBaselineTest(emptyState(), 12, "incline")).toMatchObject({
+    expect(applyBaselineTest(emptyState(), 12, "incline", "b", NOW)).toMatchObject({
       variant: "incline",
       baselineMax: 12,
       currentMax: 12,
     });
-    expect(applyBaselineTest(emptyState(), 1, "knees")).toMatchObject({ baselineMax: 3, currentMax: 3 });
+    expect(applyBaselineTest(emptyState(), 1, "knees", "b", NOW)).toMatchObject({ baselineMax: 3, currentMax: 3 });
     expect(normalizeMax(0)).toBe(3);
     expect(normalizeMax(Number.NaN)).toBe(3);
     expect(normalizeMax(7.6)).toBe(8);
@@ -74,7 +83,7 @@ describe("Basiswert", () => {
 
   it("generiert nach dem Basiswert sofort Woche 1, Einheit 1", () => {
     expect(planNextSession(emptyState())).toBeNull();
-    const plan = planNextSession(applyBaselineTest(emptyState(), 15, "standard"));
+    const plan = planNextSession(applyBaselineTest(emptyState(), 15, "standard", "b", NOW));
     expect(plan).toMatchObject({ week: 1, sessionInWeek: 1, isRetest: false, effectiveMax: 15 });
     expect(plan!.sets).toHaveLength(4);
   });
@@ -151,15 +160,13 @@ describe("Zyklus-Position", () => {
     expect(slotFromIndex(11)).toEqual({ week: 4, sessionInWeek: 3 });
   });
 
-  it("zählt Einheiten seit dem letzten Retest und startet danach neu", () => {
+  it("zählt Einheiten ab dem Zyklusbeginn", () => {
     const regular = (n: number) => Array.from({ length: n }, () => session({ startingMax: 10, endingMax: 10, sets: [] }));
-    expect(getNextSlot([])).toEqual({ week: 1, sessionInWeek: 1 });
-    expect(getNextSlot(regular(4))).toEqual({ week: 2, sessionInWeek: 2 });
-    expect(getNextSlot(regular(11))).toEqual({ week: 4, sessionInWeek: 3 });
-    const afterRetest = [...regular(11), session({ isRetest: true, week: 4, sessionInWeek: 3, startingMax: 10, endingMax: 14, sets: [] })];
-    expect(getNextSlot(afterRetest)).toEqual({ week: 1, sessionInWeek: 1 });
-    expect(getCycleNumber(afterRetest)).toBe(2);
-    expect(getNextSlot([...afterRetest, ...regular(3)])).toEqual({ week: 2, sessionInWeek: 1 });
+    expect(getNextSlot({ sessions: [], cycleStartIndex: 0 })).toEqual({ week: 1, sessionInWeek: 1 });
+    expect(getNextSlot({ sessions: regular(4), cycleStartIndex: 0 })).toEqual({ week: 2, sessionInWeek: 2 });
+    expect(getNextSlot({ sessions: regular(11), cycleStartIndex: 0 })).toEqual({ week: 4, sessionInWeek: 3 });
+    expect(getNextSlot({ sessions: regular(12), cycleStartIndex: 12 })).toEqual({ week: 1, sessionInWeek: 1 });
+    expect(getNextSlot({ sessions: regular(15), cycleStartIndex: 12 })).toEqual({ week: 2, sessionInWeek: 1 });
   });
 });
 
@@ -247,7 +254,7 @@ describe("computeNextMax (nach einer Einheit)", () => {
 
 describe("Ablauf einer Einheit", () => {
   it("loggt Sätze, passt an und schließt ab", () => {
-    let state = applyBaselineTest(emptyState(), 15, "standard");
+    let state = applyBaselineTest(emptyState(), 15, "standard", "b", NOW);
     const plan = planNextSession(state)!;
     let active = startSession(plan, "s1", NOW);
     expect(currentSetTarget(active)).toEqual({ setIndex: 1, targetReps: 8, restSeconds: 90 });
@@ -267,11 +274,11 @@ describe("Ablauf einer Einheit", () => {
     expect(state.sessions).toHaveLength(1);
     expect(state.sessions[0]).toMatchObject({ week: 1, sessionInWeek: 1, startingMax: 15, endingMax: 14 });
     expect(state.currentMax).toBe(14);
-    expect(getNextSlot(state.sessions)).toEqual({ week: 1, sessionInWeek: 2 });
+    expect(getNextSlot(state)).toEqual({ week: 1, sessionInWeek: 2 });
   });
 
   it("Retest-Einheit setzt currentMax auf das Testergebnis", () => {
-    let state = applyBaselineTest(emptyState(), 10, "standard");
+    let state = applyBaselineTest(emptyState(), 10, "standard", "b", NOW);
     for (let i = 0; i < 11; i++) {
       const plan = planNextSession(state)!;
       let active = startSession(plan, `s${i}`, NOW);
@@ -284,6 +291,72 @@ describe("Ablauf einer Einheit", () => {
     const active = logSet(startSession(retestPlan, "retest", NOW), { actualReps: 18, cleanForm: true }, NOW);
     state = finishSession(state, active, NOW);
     expect(state.currentMax).toBe(18);
+    expect(state.cycle).toBe(2);
+    expect(state.cycleStartIndex).toBe(12);
     expect(planNextSession(state)).toMatchObject({ week: 1, sessionInWeek: 1, effectiveMax: 18 });
+  });
+});
+
+describe("Plan neu starten", () => {
+  function stateAfter(sessions: number): AppState {
+    let state = applyBaselineTest(emptyState(), 12, "standard", "b0", NOW);
+    for (let i = 0; i < sessions; i++) {
+      const plan = planNextSession(state)!;
+      let active = startSession(plan, `s${i}`, NOW);
+      for (const s of plan.sets) active = logSet(active, { actualReps: s.targetReps, cleanForm: true }, NOW);
+      state = finishSession(state, active, NOW);
+    }
+    return state;
+  }
+
+  it("startet mitten im Zyklus neu bei Woche 1, Einheit 1 mit neuem Basiswert und Variante", () => {
+    const before = stateAfter(5);
+    expect(getNextSlot(before)).toEqual({ week: 2, sessionInWeek: 3 });
+    const after = applyBaselineTest(before, 6, "incline", "b1", NOW);
+    expect(after).toMatchObject({ variant: "incline", baselineMax: 6, currentMax: 6, cycle: 2, cycleStartIndex: 5 });
+    expect(after.sessions).toHaveLength(5); // Verlauf bleibt erhalten
+    expect(planNextSession(after)).toMatchObject({ week: 1, sessionInWeek: 1, effectiveMax: 6 });
+    expect(after.maxTests.map((t) => [t.kind, t.previousMax, t.newMax])).toEqual([
+      ["baseline", null, 12],
+      ["baseline", 17, 6],
+    ]);
+  });
+
+  it("zählt einen Neustart ohne absolvierte Einheit nicht als neuen Zyklus", () => {
+    const after = applyBaselineTest(stateAfter(0), 20, "standard", "b1", NOW);
+    expect(after).toMatchObject({ cycle: 1, cycleStartIndex: 0, baselineMax: 20 });
+  });
+});
+
+describe("Freie Max-Messung", () => {
+  it("setzt currentMax, lässt Zyklus-Position und Basiswert unverändert", () => {
+    let state = applyBaselineTest(emptyState(), 15, "knees", "b", NOW);
+    const plan = planNextSession(state)!;
+    let active = startSession(plan, "s1", NOW);
+    for (const s of plan.sets) active = logSet(active, { actualReps: s.targetReps, cleanForm: true }, NOW);
+    state = finishSession(state, active, NOW);
+
+    const tested = applyMaxTest(state, 20, "t1", NOW)!;
+    expect(tested).toMatchObject({ currentMax: 20, baselineMax: 15, cycle: 1, cycleStartIndex: 0 });
+    expect(tested.maxTests.at(-1)).toEqual({
+      id: "t1",
+      date: NOW.toISOString(),
+      kind: "test",
+      variant: "knees",
+      reps: 20,
+      previousMax: 16,
+      newMax: 20,
+    });
+    expect(planNextSession(tested)).toMatchObject({ week: 1, sessionInWeek: 2, effectiveMax: 20 });
+  });
+
+  it("kann den Max-Wert auch senken (min. 3)", () => {
+    const state = applyBaselineTest(emptyState(), 15, "standard", "b", NOW);
+    expect(applyMaxTest(state, 9, "t", NOW)!.currentMax).toBe(9);
+    expect(applyMaxTest(state, 1, "t", NOW)!.maxTests.at(-1)).toMatchObject({ reps: 1, newMax: 3 });
+  });
+
+  it("ist ohne Basiswert nicht möglich", () => {
+    expect(applyMaxTest(emptyState(), 10, "t", NOW)).toBeNull();
   });
 });

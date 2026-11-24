@@ -3,6 +3,7 @@ import {
   VARIANT_LABELS,
   type ActiveSession,
   type AppState,
+  type MaxTest,
   type SessionPlan,
   type SetTarget,
   type WorkoutSession,
@@ -12,19 +13,23 @@ import {
   computeRetestMax,
   currentSetTarget,
   evaluateSession,
-  getCycleNumber,
   isStrugglingSet,
 } from "../domain/planner";
 import { useRestTimer, type RestTimer } from "../hooks/useRestTimer";
 import { useWakeLock } from "../hooks/useWakeLock";
 import { Button, Card, ConfirmDialog, RepStepper, Toggle, formatSeconds } from "./ui";
 
+/** Zuletzt abgeschlossene Aktion, für die Rückmeldung oberhalb der Vorschau. */
+export type LastEvent = { kind: "session"; session: WorkoutSession } | { kind: "maxTest"; test: MaxTest };
+
 interface Props {
   state: AppState;
   plan: SessionPlan;
   active: ActiveSession | null;
-  lastFinished: WorkoutSession | null;
+  lastEvent: LastEvent | null;
   onStart: () => void;
+  onOpenMaxTest: () => void;
+  onOpenRestart: () => void;
   onLogSet: (input: { actualReps: number; cleanForm: boolean }) => void;
   onFinish: () => void;
   onAbort: () => void;
@@ -34,7 +39,7 @@ export function WorkoutScreen(props: Props) {
   return props.active ? (
     <ActiveWorkout {...props} active={props.active} />
   ) : (
-    <SessionPreview state={props.state} plan={props.plan} lastFinished={props.lastFinished} onStart={props.onStart} />
+    <SessionPreview {...props} />
   );
 }
 
@@ -49,17 +54,20 @@ function sessionTitle(s: { week: number; sessionInWeek: number }) {
 function SessionPreview({
   state,
   plan,
-  lastFinished,
+  lastEvent,
   onStart,
-}: Pick<Props, "state" | "plan" | "lastFinished" | "onStart">) {
+  onOpenMaxTest,
+  onOpenRestart,
+}: Pick<Props, "state" | "plan" | "lastEvent" | "onStart" | "onOpenMaxTest" | "onOpenRestart">) {
   const totalReps = plan.sets.reduce((sum, s) => sum + s.targetReps, 0);
   return (
     <div className="space-y-5">
-      {lastFinished && <SessionResult session={lastFinished} />}
+      {lastEvent?.kind === "session" && <SessionResult session={lastEvent.session} />}
+      {lastEvent?.kind === "maxTest" && <MaxTestResult test={lastEvent.test} />}
 
       <header>
         <p className="text-sm font-semibold tracking-wide text-emerald-500 uppercase">
-          Zyklus {getCycleNumber(state.sessions)} · Nächste Einheit
+          Zyklus {state.cycle} · Nächste Einheit
         </p>
         <h1 className="text-3xl font-black">{sessionTitle(plan)}</h1>
         <p className="text-slate-500 dark:text-slate-400">{VARIANT_LABELS[state.variant]}</p>
@@ -104,6 +112,33 @@ function SessionPreview({
       <Button tone="primary" className="min-h-16 w-full text-lg" onClick={onStart}>
         {plan.isRetest ? "Retest starten" : "Einheit starten"}
       </Button>
+      <PlanActions onOpenMaxTest={onOpenMaxTest} onOpenRestart={onOpenRestart} />
+    </div>
+  );
+}
+
+/** Max-Test und Plan-Neustart, auf Trainings- und Fortschrittsseite verfügbar. */
+export function PlanActions({ onOpenMaxTest, onOpenRestart }: Pick<Props, "onOpenMaxTest" | "onOpenRestart">) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <Button onClick={onOpenMaxTest}>Max-Test</Button>
+      <Button onClick={onOpenRestart}>Plan neu starten</Button>
+    </div>
+  );
+}
+
+function MaxTestResult({ test }: { test: MaxTest }) {
+  const title = test.kind === "baseline" ? "Neuer Plan gestartet" : "Max-Test gespeichert";
+  const before = test.previousMax !== null && test.kind === "test" ? ` (vorher ${test.previousMax})` : "";
+  return (
+    <div className="rounded-3xl bg-sky-500/10 p-5 ring-1 ring-sky-500/40" role="status">
+      <p className="text-sm font-semibold text-sky-700 dark:text-sky-300">
+        {title} · {test.reps} Wdh.
+      </p>
+      <p className="mt-1 text-lg font-semibold">
+        Dein Max-Wert ist jetzt {test.newMax}
+        {before}. Die nächsten Einheiten richten sich danach.
+      </p>
     </div>
   );
 }

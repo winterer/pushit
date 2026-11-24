@@ -1,6 +1,7 @@
 import type {
   ActiveSession,
   AppState,
+  MaxTest,
   PushupVariant,
   SessionInWeek,
   SessionPlan,
@@ -52,10 +53,59 @@ export function shouldSuggestEasierVariant(variant: PushupVariant, reps: number)
   return variant === "standard" && reps < EASIER_VARIANT_THRESHOLD;
 }
 
-/** Übernimmt das Ergebnis des Basiswert-Tests in den App-State. */
-export function applyBaselineTest(state: AppState, reps: number, variant: PushupVariant): AppState {
-  const max = normalizeMax(reps);
-  return { ...state, variant, baselineMax: max, currentMax: max };
+function maxTestEntry(
+  state: AppState,
+  kind: MaxTest["kind"],
+  reps: number,
+  variant: PushupVariant,
+  id: string,
+  now: Date,
+): MaxTest {
+  return {
+    id,
+    date: now.toISOString(),
+    kind,
+    variant,
+    reps: Math.max(0, Math.round(reps)),
+    previousMax: state.currentMax,
+    newMax: normalizeMax(reps),
+  };
+}
+
+/**
+ * Übernimmt das Ergebnis eines Basiswert-Tests und startet damit einen neuen Plan
+ * (Woche 1, Einheit 1). Wird beim Erststart und beim Neustart des Plans genutzt;
+ * bisherige Einheiten bleiben als Verlauf erhalten.
+ */
+export function applyBaselineTest(
+  state: AppState,
+  reps: number,
+  variant: PushupVariant,
+  id: string,
+  now: Date,
+): AppState {
+  const entry = maxTestEntry(state, "baseline", reps, variant, id, now);
+  // Ein Neustart ohne bereits absolvierte Einheit im Zyklus zählt nicht als neuer Zyklus.
+  const cycle = sessionsInCurrentCycle(state) > 0 ? state.cycle + 1 : state.cycle;
+  return {
+    ...state,
+    variant,
+    baselineMax: entry.newMax,
+    currentMax: entry.newMax,
+    cycleStartIndex: state.sessions.length,
+    cycle,
+    maxTests: [...state.maxTests, entry],
+  };
+}
+
+/**
+ * Freie Max-Messung zu einem beliebigen Zeitpunkt: setzt currentMax auf das
+ * Ergebnis (min. 3); die Position im laufenden Zyklus bleibt unverändert.
+ */
+export function applyMaxTest(state: AppState, reps: number, id: string, now: Date): AppState | null {
+  if (state.currentMax === null) return null;
+  const entry = maxTestEntry(state, "test", reps, state.variant, id, now);
+  return { ...state, currentMax: entry.newMax, maxTests: [...state.maxTests, entry] };
 }
 
 // ---------------------------------------------------------------------------
@@ -75,24 +125,14 @@ export function slotFromIndex(index: number): SessionSlot {
   };
 }
 
-/** Anzahl abgeschlossener Einheiten im laufenden Zyklus (nach dem letzten Retest). */
-export function sessionsInCurrentCycle(sessions: readonly WorkoutSession[]): number {
-  let count = 0;
-  for (let i = sessions.length - 1; i >= 0; i--) {
-    if (sessions[i]!.isRetest) break;
-    count++;
-  }
-  return count;
+/** Anzahl abgeschlossener Einheiten im laufenden Zyklus. */
+export function sessionsInCurrentCycle(state: Pick<AppState, "sessions" | "cycleStartIndex">): number {
+  return Math.max(0, state.sessions.length - state.cycleStartIndex);
 }
 
-/** Nächste anstehende Einheit. Nach einem Retest beginnt ein neuer Zyklus. */
-export function getNextSlot(sessions: readonly WorkoutSession[]): SessionSlot {
-  return slotFromIndex(sessionsInCurrentCycle(sessions));
-}
-
-/** Nummer des aktuellen Zyklus (1-basiert). */
-export function getCycleNumber(sessions: readonly WorkoutSession[]): number {
-  return sessions.filter((s) => s.isRetest).length + 1;
+/** Nächste anstehende Einheit im laufenden Zyklus. */
+export function getNextSlot(state: Pick<AppState, "sessions" | "cycleStartIndex">): SessionSlot {
+  return slotFromIndex(sessionsInCurrentCycle(state));
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +170,7 @@ export function buildSessionPlan(slot: SessionSlot, effectiveMax: number): Sessi
 /** Erzeugt den Plan für die nächste anstehende Einheit. */
 export function planNextSession(state: AppState): SessionPlan | null {
   if (state.currentMax === null) return null;
-  return buildSessionPlan(getNextSlot(state.sessions), state.currentMax);
+  return buildSessionPlan(getNextSlot(state), state.currentMax);
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +293,7 @@ export function logSet(
   };
 }
 
-/** Schließt eine Einheit ab und schreibt sie in den App-State. */
+/** Schließt eine Einheit ab und schreibt sie in den App-State. Nach dem Retest beginnt ein neuer Zyklus. */
 export function finishSession(state: AppState, active: ActiveSession, now: Date): AppState {
   const endingMax = active.isRetest
     ? computeRetestMax(active.logs)
@@ -268,5 +308,11 @@ export function finishSession(state: AppState, active: ActiveSession, now: Date)
     endingMax,
     sets: active.logs,
   };
-  return { ...state, currentMax: endingMax, sessions: [...state.sessions, session] };
+  const sessions = [...state.sessions, session];
+  return {
+    ...state,
+    currentMax: endingMax,
+    sessions,
+    ...(active.isRetest ? { cycleStartIndex: sessions.length, cycle: state.cycle + 1 } : {}),
+  };
 }

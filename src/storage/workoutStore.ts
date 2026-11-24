@@ -1,6 +1,7 @@
 import type {
   ActiveSession,
   AppState,
+  MaxTest,
   PushupVariant,
   SetLog,
   SetTarget,
@@ -11,10 +12,21 @@ export const STATE_KEY = "pushit.state";
 export const ACTIVE_SESSION_KEY = "pushit.activeSession";
 
 /** Minimales Storage-Interface (erleichtert Tests ohne Browser). */
+export const CURRENT_SCHEMA_VERSION = 2;
+
 export type KeyValueStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 export function createInitialState(): AppState {
-  return { schemaVersion: 1, variant: "standard", baselineMax: null, currentMax: null, sessions: [] };
+  return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    variant: "standard",
+    baselineMax: null,
+    currentMax: null,
+    sessions: [],
+    cycleStartIndex: 0,
+    cycle: 1,
+    maxTests: [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -64,12 +76,25 @@ function isWorkoutSession(v: unknown): v is WorkoutSession {
   );
 }
 
+function isMaxTest(v: unknown): v is MaxTest {
+  return (
+    isObj(v) &&
+    typeof v.id === "string" &&
+    isIsoDate(v.date) &&
+    (v.kind === "baseline" || v.kind === "test") &&
+    VARIANTS.includes(v.variant as PushupVariant) &&
+    isInt(v.reps) &&
+    isNullableMax(v.previousMax) &&
+    isInt(v.newMax, 1)
+  );
+}
+
 export type ValidationResult = { ok: true; state: AppState } | { ok: false; error: string };
 
-/** Prüft ein (z. B. importiertes) Objekt gegen das AppState-Schema v1. */
+/** Prüft ein (z. B. importiertes) Objekt gegen das aktuelle AppState-Schema. */
 export function validateAppState(data: unknown): ValidationResult {
   if (!isObj(data)) return { ok: false, error: "Kein gültiges JSON-Objekt." };
-  if (data.schemaVersion !== 1) return { ok: false, error: `Unbekannte Schema-Version: ${String(data.schemaVersion)}` };
+  if (data.schemaVersion !== CURRENT_SCHEMA_VERSION) return { ok: false, error: `Unbekannte Schema-Version: ${String(data.schemaVersion)}` };
   if (!VARIANTS.includes(data.variant as PushupVariant)) return { ok: false, error: "Ungültige Variante." };
   if (!isNullableMax(data.baselineMax)) return { ok: false, error: "Ungültiger baselineMax." };
   if (!isNullableMax(data.currentMax)) return { ok: false, error: "Ungültiger currentMax." };
@@ -79,15 +104,25 @@ export function validateAppState(data: unknown): ValidationResult {
   if (!Array.isArray(data.sessions)) return { ok: false, error: "sessions fehlt." };
   const badIndex = data.sessions.findIndex((s) => !isWorkoutSession(s));
   if (badIndex >= 0) return { ok: false, error: `Einheit #${badIndex + 1} ist ungültig.` };
+  if (!isInt(data.cycleStartIndex) || data.cycleStartIndex > data.sessions.length) {
+    return { ok: false, error: "Ungültiger cycleStartIndex." };
+  }
+  if (!isInt(data.cycle, 1)) return { ok: false, error: "Ungültige Zyklusnummer." };
+  if (!Array.isArray(data.maxTests) || !data.maxTests.every(isMaxTest)) {
+    return { ok: false, error: "Ungültige Max-Tests." };
+  }
 
   return {
     ok: true,
     state: {
-      schemaVersion: 1,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
       variant: data.variant as PushupVariant,
       baselineMax: data.baselineMax,
       currentMax: data.currentMax,
       sessions: data.sessions as WorkoutSession[],
+      cycleStartIndex: data.cycleStartIndex,
+      cycle: data.cycle,
+      maxTests: data.maxTests as MaxTest[],
     },
   };
 }
@@ -115,13 +150,31 @@ export function isActiveSession(v: unknown): v is ActiveSession {
 // ---------------------------------------------------------------------------
 
 /**
- * Überführt gespeicherte Daten in das aktuelle Schema. Bisher existiert nur v1;
- * Daten ohne Versionsfeld (Vorabversionen) werden als v1 interpretiert.
- * Weitere Versionen erhalten hier ihre Migrationsschritte.
+ * Überführt gespeicherte Daten schrittweise in das aktuelle Schema.
+ * - ohne Version (Vorabversion) → v1
+ * - v1 → v2: Zyklusbeginn/-nummer aus den Retest-Einheiten ableiten, leere Max-Test-Historie
+ * Ungültige Daten werden unverändert durchgereicht und anschließend von der Validierung abgelehnt.
  */
 export function migrate(raw: unknown): unknown {
-  if (isObj(raw) && raw.schemaVersion === undefined) return { ...raw, schemaVersion: 1 };
-  return raw;
+  if (!isObj(raw)) return raw;
+  let data: Obj = raw;
+  if (data.schemaVersion === undefined) data = { ...data, schemaVersion: 1 };
+  if (data.schemaVersion === 1 && Array.isArray(data.sessions)) {
+    const sessions = data.sessions as unknown[];
+    const isRetest = (s: unknown) => isObj(s) && s.isRetest === true;
+    let lastRetest = -1;
+    sessions.forEach((s, i) => {
+      if (isRetest(s)) lastRetest = i;
+    });
+    data = {
+      ...data,
+      schemaVersion: 2,
+      cycleStartIndex: lastRetest + 1,
+      cycle: sessions.filter(isRetest).length + 1,
+      maxTests: [],
+    };
+  }
+  return data;
 }
 
 // ---------------------------------------------------------------------------

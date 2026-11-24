@@ -33,4 +33,14 @@ npm run preview    # Build lokal ausliefern (für Offline-/Installations-Test)
 - **Retest (W4/E3):** ein Max-Satz; das Ergebnis (min. 3) wird neuer `currentMax`,
   danach beginnt automatisch ein neuer Zyklus.
 - **Laufende Einheit** wird separat (`pushit.activeSession`) gespeichert, damit geloggte
-  Sätze und eine laufende Pause einen Reload überstehen; `AppState` bleibt unverändert v1.
+  Sätze und eine laufende Pause einen Reload überstehen.
+- **Plan neu starten:** jederzeit möglich (Training/Fortschritt → „Plan neu starten“). Neuer
+  Basistest, Variante frei wählbar; der Plan beginnt wieder bei W1/E1, der Verlauf bleibt.
+  Ein Neustart ohne absolvierte Einheit im Zyklus erhöht die Zyklusnummer nicht.
+- **Freier Max-Test:** jederzeit möglich; das Ergebnis (min. 3, auch niedriger als bisher)
+  wird neuer `currentMax`. Variante, Basiswert und Position im Zyklus bleiben unverändert.
+
+## Datenschema
+
+`AppState` ist aktuell **Version 2** (`cycleStartIndex`, `cycle`, `maxTests`). Gespeicherte
+oder importierte v1-Daten werden automatisch migriert (Zyklusbeginn aus den Retests abgeleitet).

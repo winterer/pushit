@@ -29,12 +29,30 @@ export interface WorkoutSession {
   sets: SetLog[];
 }
 
+/** "baseline": Basistest zu Beginn eines Plans, "test": freie Max-Messung zwischendurch. */
+export type MaxTestKind = "baseline" | "test";
+
+export interface MaxTest {
+  id: string;
+  date: string; // ISO-8601
+  kind: MaxTestKind;
+  variant: PushupVariant;
+  reps: number; // gemessene saubere Wiederholungen
+  previousMax: number | null;
+  newMax: number;
+}
+
 export interface AppState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   variant: PushupVariant;
   baselineMax: number | null;
   currentMax: number | null;
   sessions: WorkoutSession[];
+  /** Index in `sessions`, ab dem der laufende 4-Wochen-Zyklus zählt. */
+  cycleStartIndex: number;
+  /** Nummer des laufenden Zyklus (1-basiert). */
+  cycle: number;
+  maxTests: MaxTest[];
 }
 
 /** Position einer Einheit im 4-Wochen-Zyklus. */
